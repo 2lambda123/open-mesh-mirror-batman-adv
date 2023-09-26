@@ -974,8 +974,14 @@ static int batadv_mcast_forw_mode_check_ipv4(struct batadv_priv *bat_priv,
 	if (!pskb_may_pull(skb, sizeof(struct ethhdr) + sizeof(*iphdr)))
 		return -ENOMEM;
 
-	if (batadv_mcast_is_report_ipv4(skb))
+	if (batadv_mcast_is_report_ipv4(skb)) {
+		if (atomic_read(&bat_priv->multicast_mld_rtr_only)) {
+			*is_routable = IGMP_HOST_MEMBERSHIP_REPORT;
+			return 0;
+		}
+
 		return -EINVAL;
+	}
 
 	iphdr = ip_hdr(skb);
 
@@ -1038,8 +1044,14 @@ static int batadv_mcast_forw_mode_check_ipv6(struct batadv_priv *bat_priv,
 	if (!pskb_may_pull(skb, sizeof(struct ethhdr) + sizeof(*ip6hdr)))
 		return -ENOMEM;
 
-	if (batadv_mcast_is_report_ipv6(skb))
+	if (batadv_mcast_is_report_ipv6(skb)) {
+		if (atomic_read(&bat_priv->multicast_mld_rtr_only)) {
+			*is_routable = ICMPV6_MGM_REPORT;
+			return 0;
+		}
+
 		return -EINVAL;
+	}
 
 	ip6hdr = ipv6_hdr(skb);
 
@@ -1126,17 +1138,19 @@ static int batadv_mcast_forw_want_all_ip_count(struct batadv_priv *bat_priv,
  * @protocol: the ethernet protocol type to count multicast routers for
  *
  * Return: the number of nodes which want all routable IPv4 multicast traffic
- * if the protocol is ETH_P_IP or the number of nodes which want all routable
- * IPv6 traffic if the protocol is ETH_P_IPV6. Otherwise returns 0.
+ * if the protocol is ETH_P_IP or IGMP_HOST_MEMBERSHIP_REPORT. Or the number of
+ * nodes which want all routable IPv6 traffic if the protocol is ETH_P_IPV6 or
+ * ICMPV6_MGM_REPORT. Otherwise returns 0.
  */
-
 static int batadv_mcast_forw_rtr_count(struct batadv_priv *bat_priv,
 				       int protocol)
 {
 	switch (protocol) {
 	case ETH_P_IP:
+	case IGMP_HOST_MEMBERSHIP_REPORT:
 		return atomic_read(&bat_priv->mcast.num_want_all_rtr4);
 	case ETH_P_IPV6:
+	case ICMPV6_MGM_REPORT:
 		return atomic_read(&bat_priv->mcast.num_want_all_rtr6);
 	default:
 		return 0;
@@ -1155,10 +1169,11 @@ enum batadv_forw_mode
 batadv_mcast_forw_mode(struct batadv_priv *bat_priv, struct sk_buff *skb,
 		       int *is_routable)
 {
-	int ret, tt_count, ip_count, unsnoop_count, total_count;
+	atomic_t *unsnoop_cnt_atom = &bat_priv->mcast.num_want_all_unsnoopables;
+	int ret, ip_count, rtr_count, total_count;
+	int tt_count = 0, unsnoop_count = 0;
 	bool is_unsnoopable = false;
 	struct ethhdr *ethhdr;
-	int rtr_count = 0;
 
 	ret = batadv_mcast_forw_mode_check(bat_priv, skb, &is_unsnoopable,
 					   is_routable);
@@ -1169,11 +1184,17 @@ batadv_mcast_forw_mode(struct batadv_priv *bat_priv, struct sk_buff *skb,
 
 	ethhdr = eth_hdr(skb);
 
-	tt_count = batadv_tt_global_hash_count(bat_priv, ethhdr->h_dest,
-					       BATADV_NO_FLAGS);
-	ip_count = batadv_mcast_forw_want_all_ip_count(bat_priv, ethhdr);
-	unsnoop_count = !is_unsnoopable ? 0 :
-			atomic_read(&bat_priv->mcast.num_want_all_unsnoopables);
+	if (*is_routable != IGMP_HOST_MEMBERSHIP_REPORT &&
+	    *is_routable != ICMPV6_MGM_REPORT) {
+		tt_count = batadv_tt_global_hash_count(bat_priv, ethhdr->h_dest,
+						       BATADV_NO_FLAGS);
+
+		if (is_unsnoopable)
+			unsnoop_count = atomic_read(unsnoop_cnt_atom);
+	}
+
+	ip_count = batadv_mcast_forw_want_all_ip_count(bat_priv,
+						       ethhdr);
 	rtr_count = batadv_mcast_forw_rtr_count(bat_priv, *is_routable);
 
 	total_count = tt_count + ip_count + unsnoop_count + rtr_count;
@@ -1463,8 +1484,10 @@ batadv_mcast_forw_want_rtr(struct batadv_priv *bat_priv,
 {
 	switch (ntohs(eth_hdr(skb)->h_proto)) {
 	case ETH_P_IP:
+	case IGMP_HOST_MEMBERSHIP_REPORT:
 		return batadv_mcast_forw_want_all_rtr4(bat_priv, skb, vid);
 	case ETH_P_IPV6:
+	case ICMPV6_MGM_REPORT:
 		return batadv_mcast_forw_want_all_rtr6(bat_priv, skb, vid);
 	default:
 		/* we shouldn't be here... */
@@ -1494,12 +1517,17 @@ int batadv_mcast_forw_send(struct batadv_priv *bat_priv, struct sk_buff *skb,
 {
 	int ret;
 
+	if (is_routable == IGMP_HOST_MEMBERSHIP_REPORT ||
+	    is_routable == ICMPV6_MGM_REPORT)
+		goto skip_mc_listeners;
+
 	ret = batadv_mcast_forw_tt(bat_priv, skb, vid);
 	if (ret != NET_XMIT_SUCCESS) {
 		kfree_skb(skb);
 		return ret;
 	}
 
+skip_mc_listeners:
 	ret = batadv_mcast_forw_want_all(bat_priv, skb, vid);
 	if (ret != NET_XMIT_SUCCESS) {
 		kfree_skb(skb);

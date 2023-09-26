@@ -1613,6 +1613,13 @@ struct batadv_priv {
 	 *  multicast-to-unicast conversion
 	 */
 	atomic_t multicast_fanout;
+
+	/**
+	 * @multicast_mld_rtr_only: bool indicating whether to send IGMP/MLD
+	 *  reports only to multicast routers or to flood them otherwise.
+	 * Warning: The former is experimental and potentially unsafe!
+	 */
+	atomic_t multicast_mld_rtr_only;
 #endif
 
 	/** @orig_interval: OGM broadcast interval in milliseconds */
