@@ -500,14 +500,17 @@ static void batadv_tt_local_event(struct batadv_priv *bat_priv,
 		/* this is a second add in the same originator interval. It
 		 * means that flags have been changed: update them!
 		 */
-		if (!del_op_requested && !del_op_entry)
+		if (del_op_requested == del_op_entry) {
 			entry->change.flags = flags;
+			goto discard;
+		}
 
 		continue;
 del:
 		list_del(&entry->list);
 		kmem_cache_free(batadv_tt_change_cache, entry);
 		bat_priv->tt.local_changes--;
+discard:
 		kmem_cache_free(batadv_tt_change_cache, tt_change_node);
 		goto unlock;
 	}
